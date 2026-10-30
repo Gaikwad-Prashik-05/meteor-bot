@@ -21,6 +21,13 @@ class RunController(
     val planner = Planner(rng)
 
     @Volatile var masks: List<Box> = emptyList()
+
+    // Counters for the on-screen stats line.
+    @Volatile var frames = 0; private set
+    @Volatile var stale = 0; private set
+    @Volatile var strokes = 0; private set
+    @Volatile var aborts = 0; private set
+    @Volatile var lastGrey = 0f; private set
     @Volatile var strokeBusyUntilMs = 0L
 
     private var gameSeen = false
@@ -29,7 +36,9 @@ class RunController(
     private var inFlight: Stroke? = null
 
     fun onFrame(argb: IntArray, w: Int, h: Int, frameTimeMs: Long, nowMs: Long) {
-        if (stopped || nowMs - frameTimeMs > STALE_MS) return
+        if (stopped) return
+        frames++
+        if (nowMs - frameTimeMs > STALE_MS) { stale++; return }
         onDetected(detector.detect(argb, w, h, frameTimeMs, masks), nowMs)
     }
 
@@ -51,6 +60,7 @@ class RunController(
         gameSeen = true
         otherSinceMs = -1
 
+        lastGrey = f.planetGrey
         planner.allowMisses(f.planetGrey, tracker.missed)
         if (nowMs < strokeBusyUntilMs) {
             val s = inFlight ?: return
@@ -61,6 +71,7 @@ class RunController(
         val s = planner.plan(tracks, nowMs, f.aspect, masks) ?: return
         inFlight = s
         strokeBusyUntilMs = s.startMs + s.segments.sumOf { it.durationMs }
+        strokes++
         dispatch(s)
     }
 
@@ -74,6 +85,7 @@ class RunController(
         val tap = Stroke(nowMs + planner.latencyMs, listOf(Segment(spot, spot, spot, 1)), emptyList())
         inFlight = null
         strokeBusyUntilMs = tap.startMs + 1
+        aborts++
         dispatch(tap)
     }
 }

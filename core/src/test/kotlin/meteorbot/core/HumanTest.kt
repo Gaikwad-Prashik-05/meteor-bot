@@ -86,3 +86,27 @@ class HumanTest {
         assertTrue(planned > 500)
     }
 }
+
+class ReactionFromSightingTest {
+    @Test fun meteorSeenLongAgoIsCutWithoutExtraDelay() {
+        // Reaction time counts from when the meteor first appeared, not from when the bot became free.
+        val p = Planner(Random(9))
+        val m = meteor(.5f, 1f).copy(bornMs = 500)
+        val s = p.plan(listOf(m), 1000, 2.2f, emptyList())!!
+        assertEquals(1000 + p.latencyMs, s.startMs)
+    }
+
+    @Test fun newMeteorStillGetsReactionDelay() {
+        val p = Planner(Random(9))
+        val m = meteor(.5f, 1f).copy(bornMs = 980)
+        val d = p.plan(listOf(m), 1000, 2.2f, emptyList())!!.startMs - (980 + p.latencyMs)
+        assertTrue(d in 80L..200L)
+    }
+
+    @Test fun trackerRemembersFirstSighting() {
+        val tr = Tracker()
+        val f = { t: Long, y: Float -> Frame(t, 2.2f, ScreenState.GAME, listOf(Blob(Vec(.5f, y), .04f)), emptyList(), 0f) }
+        tr.update(f(100, .5f)); tr.update(f(133, .53f))
+        assertEquals(100L, tr.update(f(166, .56f)).single().bornMs)
+    }
+}

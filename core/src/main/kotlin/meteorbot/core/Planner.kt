@@ -86,8 +86,11 @@ class Planner(private val rng: Random, val latencyMs: Long = 60) {
         val bombs = tracks.filter { it.kind == Kind.BOMB }
         val candidates = tracks.filter { it.kind == Kind.METEOR && it.seen >= 2 && it.id !in ignored }
             .sortedByDescending { it.pos.y }
-        val start = nowMs + latencyMs + rng.nextInt(reactionMs.first, reactionMs.last + 1)
+        val delay = rng.nextInt(reactionMs.first, reactionMs.last + 1)
         for (first in candidates) {
+            // Reaction time counts from the meteor's first sighting, like a person who saw it coming,
+            // so the bot never sits idle between strokes.
+            val start = maxOf(nowMs, first.bornMs + delay) + latencyMs
             // Each meteor gets one chance to become a deliberate miss, the first time it is the lead target.
             if (decided.add(first.id) && missesAllowed && isolated(first, tracks) && rng.nextFloat() < MISS_CHANCE) {
                 ignored += first.id

@@ -31,6 +31,8 @@ class CaptureService : Service() {
     private var reader: ImageReader? = null
     @Volatile var running = false
         private set
+    @Volatile var lagMs = 0L; private set      // capture delay, before any clock fallback
+    @Volatile var detectMs = 0L; private set
     private val stopping = AtomicBoolean(false)
 
     override fun onBind(intent: Intent?) = null
@@ -80,9 +82,11 @@ class CaptureService : Service() {
                 rgbaToArgb(plane.buffer, w, h, plane.rowStride, plane.pixelStride, pixels)
                 val now = SystemClock.uptimeMillis()
                 var frameMs = img.timestamp / 1_000_000
+                lagMs = now - frameMs
                 // shortcut: if a device stamps frames on another clock, treat them as fresh; revisit if aim is off on such a phone
                 if (abs(now - frameMs) > 10_000) frameMs = now
                 controller.onFrame(pixels, w, h, frameMs, now)
+                detectMs = SystemClock.uptimeMillis() - now
             } finally {
                 img.close()
             }

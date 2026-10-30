@@ -11,6 +11,7 @@ enum class Kind { METEOR, BOMB }
 data class Track(
     val id: Int, val kind: Kind, val pos: Vec, val vel: Vec /* units per ms */,
     val radius: Float, val seen: Int, val lastSeenMs: Long,
+    val bornMs: Long = lastSeenMs,  // first sighting
 ) {
     fun at(tMs: Long): Vec = pos + vel * (tMs - lastSeenMs).toFloat()
 }

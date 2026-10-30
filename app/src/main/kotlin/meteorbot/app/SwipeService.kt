@@ -34,6 +34,10 @@ class SwipeService : AccessibilityService() {
     // app in front at its first swipe; any other app or the notification shade stops it.
     @Volatile private var foreground: CharSequence? = null
     private var runPackage: CharSequence? = null
+    private var stats: TextView? = null
+    private var done = 0
+    private var cancelled = 0
+    private var lastFrames = 0
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -51,12 +55,24 @@ class SwipeService : AccessibilityService() {
             setOnTouchListener(DragListener())
         }
         wm.addView(button, params)
+        stats = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 10f
+            setBackgroundColor(0x99000000.toInt())
+            visibility = View.GONE
+        }
+        wm.addView(stats, WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.BOTTOM or Gravity.START; x = 0; y = 0 })
         Bot.swipe = this
         setRunning(Bot.capture?.running == true)
     }
 
     fun setRunning(running: Boolean) = main.post {
-        if (running) runPackage = null
+        if (running) { runPackage = null; done = 0; cancelled = 0; lastFrames = 0; main.post(::showStats) }
         button?.apply {
             text = if (running) "Stop" else "Start"
             background = GradientDrawable().apply {
@@ -64,6 +80,18 @@ class SwipeService : AccessibilityService() {
                 setColor(if (running) 0xCCC62828.toInt() else 0xCC2E7D32.toInt())
             }
         }
+    }
+
+    /** One line at the bottom-left while running, e.g. "fps 28 lag 41 det 9 | sent 30 ok 27 x 1 abort 0 | grey 0.04". */
+    private fun showStats() {
+        val c = Bot.controller; val cap = Bot.capture
+        val v = stats ?: return
+        if (c == null || cap == null || !cap.running) return  // keep the last run's numbers on screen
+        v.visibility = View.VISIBLE
+        v.text = "fps %d lag %d det %d stale %d | sent %d ok %d x %d abort %d | grey %.2f".format(
+            (c.frames - lastFrames) * 2, cap.lagMs, cap.detectMs, c.stale, c.strokes, done, cancelled, c.aborts, c.lastGrey)
+        lastFrames = c.frames
+        main.postDelayed(::showStats, 500)
     }
 
     private fun onButtonTap() {
@@ -120,8 +148,11 @@ class SwipeService : AccessibilityService() {
         val d = seg.durationMs.coerceAtLeast(1)
         val desc = prev?.continueStroke(path, 0, d, more) ?: GestureDescription.StrokeDescription(path, 0, d, more)
         dispatchGesture(GestureDescription.Builder().addStroke(desc).build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription) { if (more) dispatchSegment(s, i + 1, desc, gen) }
-            override fun onCancelled(g: GestureDescription) { if (gen == generation) Bot.controller?.strokeBusyUntilMs = 0 }
+            override fun onCompleted(g: GestureDescription) { if (more) dispatchSegment(s, i + 1, desc, gen) else done++ }
+            override fun onCancelled(g: GestureDescription) {
+                cancelled++
+                if (gen == generation) Bot.controller?.strokeBusyUntilMs = 0
+            }
         }, main)
     }
 
@@ -163,6 +194,7 @@ class SwipeService : AccessibilityService() {
         Bot.capture?.stopRun()
         Bot.swipe = null
         button?.let { wm.removeView(it) }
+        stats?.let { wm.removeView(it) }
         super.onDestroy()
     }
 }
