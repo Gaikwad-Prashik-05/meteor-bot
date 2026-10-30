@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
@@ -49,7 +50,11 @@ class SetupActivity : Activity() {
 
     private fun askCapture() {
         val mpm = getSystemService(MediaProjectionManager::class.java)
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE)
+        // Whole screen only: single-app capture would scale frames away from gesture coordinates.
+        val intent = if (Build.VERSION.SDK_INT >= 34)
+            mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        else mpm.createScreenCaptureIntent()
+        startActivityForResult(intent, REQ_CAPTURE)
     }
 
     @Deprecated("Activity result API needs AndroidX; this app has no dependencies")

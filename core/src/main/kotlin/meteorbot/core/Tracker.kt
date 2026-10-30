@@ -1,6 +1,8 @@
 package meteorbot.core
 
 private const val MATCH_RADIUS = 0.1f   // width units
+private const val FIRST_MATCH_RADIUS = 0.25f // no velocity yet: a fast meteor or a dropped frame can move this far
+private const val FIRST_MATCH_RISE = 0.03f   // ...but objects only fall, so never match far upward
 private const val DROP_AFTER_MS = 150L
 private const val HIT_PLANET = 0.85f    // fraction of aspect below which a vanished meteor counts as missed
 
@@ -26,7 +28,10 @@ class Tracker {
             // Greedy nearest-first matching against each track's predicted position.
             val pairs = blobs.indices.flatMap { b ->
                 unmatched.filter { it.kind == kind }.map { t -> Triple(b, t, (t.at(f.timeMs) - blobs[b].pos).len()) }
-            }.filter { it.third < MATCH_RADIUS }.sortedBy { it.third }
+            }.filter { (b, t, d) ->
+                if (t.seen > 1) d < MATCH_RADIUS
+                else d < FIRST_MATCH_RADIUS && blobs[b].pos.y - t.pos.y > -FIRST_MATCH_RISE
+            }.sortedBy { it.third }
             val used = HashSet<Int>()
             for ((b, t, _) in pairs) {
                 if (b in used || t !in unmatched) continue

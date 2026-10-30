@@ -27,6 +27,13 @@ class SwipeService : AccessibilityService() {
     private var button: TextView? = null
     private lateinit var params: WindowManager.LayoutParams
     private val main = Handler(Looper.getMainLooper())
+    private val token = Any()
+    // Main thread only. Bumped on every new stroke and cancel, so stale swipes and callbacks do nothing.
+    private var generation = 0
+    // App in front, from window-change events (no screen content is read). The run is locked to the
+    // app in front at its first swipe; any other app or the notification shade stops it.
+    @Volatile private var foreground: CharSequence? = null
+    private var runPackage: CharSequence? = null
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -49,6 +56,7 @@ class SwipeService : AccessibilityService() {
     }
 
     fun setRunning(running: Boolean) = main.post {
+        if (running) runPackage = null
         button?.apply {
             text = if (running) "Stop" else "Start"
             background = GradientDrawable().apply {
@@ -82,13 +90,26 @@ class SwipeService : AccessibilityService() {
             @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(it)
         }.widthPixels
 
-    /** Runs [s] at its touch time; segments are chained into one continuous finger movement. */
+    /** Runs [s] at its touch time, replacing anything queued; segments chain into one finger movement. */
     fun perform(s: Stroke) {
         val latency = Bot.controller?.planner?.latencyMs ?: 60L
-        main.postAtTime({ dispatchSegment(s, 0, null) }, s.startMs - latency)
+        main.post {
+            val gen = ++generation
+            main.removeCallbacksAndMessages(token)
+            main.postAtTime({ dispatchSegment(s, 0, null, gen) }, token, s.startMs - latency)
+        }
     }
 
-    private fun dispatchSegment(s: Stroke, i: Int, prev: GestureDescription.StrokeDescription?) {
+    /** Drops queued swipes and stops chaining the current one. */
+    fun cancelAll() {
+        main.post { generation++; main.removeCallbacksAndMessages(token) }
+    }
+
+    private fun dispatchSegment(s: Stroke, i: Int, prev: GestureDescription.StrokeDescription?, gen: Int) {
+        if (gen != generation) return
+        val fg = foreground
+        if (runPackage == null && fg != null && fg !in SYSTEM_UI) runPackage = fg
+        if (runPackage != null && fg != runPackage) { generation++; Bot.capture?.stopRun(); return }
         val seg = s.segments[i]
         val k = screenWidth().toFloat()
         val path = Path().apply {
@@ -99,8 +120,8 @@ class SwipeService : AccessibilityService() {
         val d = seg.durationMs.coerceAtLeast(1)
         val desc = prev?.continueStroke(path, 0, d, more) ?: GestureDescription.StrokeDescription(path, 0, d, more)
         dispatchGesture(GestureDescription.Builder().addStroke(desc).build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription) { if (more) dispatchSegment(s, i + 1, desc) }
-            override fun onCancelled(g: GestureDescription) { Bot.controller?.strokeBusyUntilMs = 0 }
+            override fun onCompleted(g: GestureDescription) { if (more) dispatchSegment(s, i + 1, desc, gen) }
+            override fun onCancelled(g: GestureDescription) { if (gen == generation) Bot.controller?.strokeBusyUntilMs = 0 }
         }, main)
     }
 
@@ -123,8 +144,20 @@ class SwipeService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val pkg = event.packageName ?: return
+        if (pkg == packageName) return
+        foreground = pkg
+        val run = runPackage
+        if (run != null && pkg != run && Bot.capture?.running == true) { cancelAll(); Bot.capture?.stopRun() }
+    }
     override fun onInterrupt() {}
+
+    companion object {
+        // Packages that own the capture-consent dialog; never lock a run to these.
+        private val SYSTEM_UI = setOf("com.android.systemui", "android")
+    }
 
     override fun onDestroy() {
         Bot.capture?.stopRun()

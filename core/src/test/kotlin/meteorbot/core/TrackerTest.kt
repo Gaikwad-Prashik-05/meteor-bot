@@ -38,9 +38,23 @@ class TrackerTest {
 
     @Test fun matchRadius() {
         val tr = Tracker()
-        val a = tr.update(frame(0, listOf(Vec(.5f, .5f)))).single().id
-        val b = tr.update(frame(33, listOf(Vec(.5f, .65f)))).first { it.lastSeenMs == 33L }.id
+        tr.update(frame(0, listOf(Vec(.5f, .5f))))
+        val a = tr.update(frame(33, listOf(Vec(.5f, .52f)))).single().id
+        val b = tr.update(frame(66, listOf(Vec(.5f, .69f)))).first { it.lastSeenMs == 66L }.id
         assertNotEquals(a, b)
+    }
+
+    @Test fun firstMatchAllowsFastFall() {
+        // ~0.2 widths in one frame (fast meteor or a dropped frame) still keeps the track
+        val tr = Tracker()
+        val a = tr.update(frame(0, listOf(Vec(.5f, .5f)))).single().id
+        assertEquals(a, tr.update(frame(66, listOf(Vec(.52f, .7f)))).single().id)
+    }
+
+    @Test fun firstMatchNeverJumpsUp() {
+        val tr = Tracker()
+        val a = tr.update(frame(0, listOf(Vec(.5f, .5f)))).single().id
+        assertNotEquals(a, tr.update(frame(33, listOf(Vec(.5f, .35f)))).first { it.lastSeenMs == 33L }.id)
     }
 
     @Test fun countsMissAtBottom() {

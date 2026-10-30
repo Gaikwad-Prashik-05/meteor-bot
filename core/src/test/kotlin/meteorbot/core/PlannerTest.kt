@@ -82,4 +82,39 @@ class PlannerTest {
         }
         assertTrue("planner almost never acts: $planned", planned > 500)
     }
+
+    @Test fun newBombAssumedFalling() {
+        // A bomb seen once has no velocity yet; it may be falling fast, so a cut just below it is unsafe.
+        val m = meteor(.5f, 1.3f, vy = 0f)
+        val fresh = bomb(.5f, 0.95f, vy = 0f).copy(seen = 1)
+        assertNull(planner().plan(listOf(m, fresh), now, aspect, emptyList()))
+        assertNotNull(planner().plan(listOf(m, fresh.copy(seen = 3)), now, aspect, emptyList()))
+    }
+
+    @Test fun lateStrokeStillClear() {
+        // Safety holds even if the gesture runs up to 80 ms late: a bomb that only reaches the cut
+        // after its planned time must still block it.
+        val m = meteor(.5f, 1f, vy = 0f)
+        val b = bomb(.5f, 0.55f, vy = 0.0015f)  // 0.30 clear on time, 0.18 if 80 ms late
+        assertNull(planner().plan(listOf(m, b), now, aspect, emptyList()))
+    }
+
+    @Test fun strokeKeepsClearOfMaskedArea() {
+        // a bomb could be hidden under the button, so cuts stay well away from it
+        val m = meteor(.5f, 1f, vy = 0f)
+        assertNull(planner().plan(listOf(m), now, aspect, listOf(Box(.62f, .9f, .7f, 1.1f))))
+    }
+
+    @Test fun controlPointMustBeOnScreen() {
+        val seg = Segment(Vec(.005f, 1f), Vec(-.01f, 1.06f), Vec(.005f, 1.12f), 60)
+        assertTrue(!strokeIsSafe(Stroke(now, listOf(seg), emptyList()), emptyList(), aspect))
+    }
+
+    @Test fun pastPartIgnoredWhenRechecking() {
+        val seg = Segment(Vec(.4f, 1f), Vec(.5f, 1f), Vec(.6f, 1f), 60)
+        val s = Stroke(now, listOf(seg, Segment(Vec(.6f, 1f), Vec(.7f, 1f), Vec(.8f, 1f), 60)), emptyList())
+        val b = bomb(.3f, 1f, vy = 0f, t = now)
+        assertTrue(!strokeIsSafe(s, listOf(b), aspect))
+        assertTrue(strokeIsSafe(s, listOf(b), aspect, fromMs = now + 60))
+    }
 }

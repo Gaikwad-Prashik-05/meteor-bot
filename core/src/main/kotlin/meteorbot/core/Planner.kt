@@ -18,6 +18,9 @@ private const val CHAIN_MAX = 3
 private const val CHAIN_REACH = 0.25f
 private const val BOMB_CLEARANCE = 1.5f * 2f         // × bomb radius, i.e. 1.5 bomb diameters from its centre
 private const val SAMPLE_MS = 5L
+private const val LATE_SLACK_MS = 80L                // gestures may run this late; bombs are checked over the window
+private const val BOMB_MAX_FALL = 0.003f             // width units per ms; assumed for a bomb seen only once
+private const val MASK_MARGIN = 0.18f                // a bomb may hide under the button; keep cuts this far away
 private const val HUD = 0.08f
 
 /** A quadratic curve from a to b with control point mid. */
@@ -28,16 +31,30 @@ data class Segment(val a: Vec, val mid: Vec, val b: Vec, val durationMs: Long) {
 /** startMs is when the finger touches the screen; dispatch it [Planner.latencyMs] earlier. */
 data class Stroke(val startMs: Long, val segments: List<Segment>, val targetIds: List<Int>)
 
-/** True when every point of the stroke, at the moment the finger is there, keeps clear of every bomb. */
-fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> = emptyList()): Boolean {
+/**
+ * True when every point of the stroke from [fromMs] on keeps clear of every bomb, even if the finger
+ * gets there up to [LATE_SLACK_MS] late. A bomb seen only once is assumed to be falling as fast as anything does.
+ */
+fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> = emptyList(), fromMs: Long = Long.MIN_VALUE): Boolean {
+    val keepOut = masks.map { Box(it.l - MASK_MARGIN, it.t - MASK_MARGIN, it.r + MASK_MARGIN, it.b + MASK_MARGIN) }
     var t0 = s.startMs
     for (seg in s.segments) {
+        // The path's control point counts toward gesture bounds, so it must be on screen too.
+        if (seg.mid.x !in 0f..1f || seg.mid.y !in 0f..aspect) return false
         var dt = 0L
         while (true) {
+            val t = t0 + dt
             val p = seg.point(if (seg.durationMs == 0L) 1f else dt.toFloat() / seg.durationMs)
-            if (p.x !in 0f..1f || p.y !in HUD * aspect..aspect) return false
-            if (masks.any { it.contains(p) }) return false
-            for (b in bombs) if ((p - b.at(t0 + dt)).len() <= BOMB_CLEARANCE * b.radius) return false
+            if (t >= fromMs) {
+                if (p.x !in 0f..1f || p.y !in HUD * aspect..aspect) return false
+                if (keepOut.any { it.contains(p) }) return false
+                for (b in bombs) {
+                    val from = b.at(t)
+                    val to = if (b.seen > 1) b.at(t + LATE_SLACK_MS)
+                    else from + Vec(0f, BOMB_MAX_FALL * (t + LATE_SLACK_MS - b.lastSeenMs).coerceAtLeast(0))
+                    if (distToSegment(p, from, to) <= BOMB_CLEARANCE * b.radius) return false
+                }
+            }
             if (dt >= seg.durationMs) break
             dt = minOf(dt + SAMPLE_MS, seg.durationMs)
         }

@@ -25,6 +25,7 @@ import meteorbot.core.rgbaToArgb
 /** Captures the screen at 1/3 resolution and feeds every frame to a [RunController]. */
 class CaptureService : Service() {
     private var thread: HandlerThread? = null
+    private var handler: Handler? = null
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
@@ -54,16 +55,19 @@ class CaptureService : Service() {
         val t = HandlerThread("capture").apply { start() }
         thread = t
         val handler = Handler(t.looper)
+        this.handler = handler
         val mp = getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data)
         if (mp == null) { stopRun(); return START_NOT_STICKY }
         projection = mp
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() = stopRun()
+            // "Share one app" capture: once that app is hidden the frames stop, so end the run here.
+            override fun onCapturedContentVisibilityChanged(isVisible: Boolean) { if (!isVisible) stopRun() }
         }, handler)
 
         val (sw, sh, dpi) = screen()
         val w = sw / 3; val h = sh / 3
-        val controller = RunController(Random.Default, { s -> Bot.swipe?.perform(s) }, ::stopRun)
+        val controller = RunController(Random.Default, { s -> Bot.swipe?.perform(s) }, ::stopRun, { Bot.swipe?.cancelAll() })
         Bot.swipe?.buttonBox()?.let { controller.masks = listOf(it) }
         Bot.controller = controller
         val pixels = IntArray(w * h)
@@ -107,12 +111,19 @@ class CaptureService : Service() {
     fun stopRun() {
         if (!stopping.compareAndSet(false, true)) return  // projection.stop() calls back into here
         running = false
+        Bot.swipe?.cancelAll()
         Bot.controller = null
         Bot.capture = null
+        // Tear down on the capture thread, after any frame it is reading; ImageReader is not thread-safe.
+        val h = handler
+        if (h == null || h.looper == android.os.Looper.myLooper()) teardown() else h.post(::teardown)
+    }
+
+    private fun teardown() {
         display?.release(); display = null
         reader?.close(); reader = null
         projection?.stop(); projection = null
-        thread?.quitSafely(); thread = null
+        thread?.quitSafely(); thread = null; handler = null
         Bot.swipe?.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

@@ -9,7 +9,13 @@ private const val END_AFTER_MS = 1000L    // non-game screen this long after gam
  * One run: frames in, strokes out. Call [onFrame] from a single thread.
  * Ends the run (calls onStop once) when the game screen has been gone for a second.
  */
-class RunController(rng: Random, private val dispatch: (Stroke) -> Unit, private val onStop: () -> Unit) {
+class RunController(
+    rng: Random,
+    private val dispatch: (Stroke) -> Unit,
+    private val onStop: () -> Unit,
+    /** Drops any queued or running swipe without touching the screen. */
+    private val cancel: () -> Unit = {},
+) {
     val detector = Detector()
     val tracker = Tracker()
     val planner = Planner(rng)
@@ -32,7 +38,13 @@ class RunController(rng: Random, private val dispatch: (Stroke) -> Unit, private
         val tracks = tracker.update(f)
         if (f.state != ScreenState.GAME) {
             if (!gameSeen) return
-            if (otherSinceMs < 0) otherSinceMs = f.timeMs
+            if (otherSinceMs < 0) {
+                // Shade pulled down or app switched: never let a swipe land on other UI.
+                otherSinceMs = f.timeMs
+                cancel()
+                inFlight = null
+                strokeBusyUntilMs = 0
+            }
             if (f.timeMs - otherSinceMs >= END_AFTER_MS) { stopped = true; onStop() }
             return
         }
@@ -42,8 +54,8 @@ class RunController(rng: Random, private val dispatch: (Stroke) -> Unit, private
         planner.allowMisses(f.planetGrey, tracker.missed)
         if (nowMs < strokeBusyUntilMs) {
             val s = inFlight ?: return
-            val fresh = tracks.filter { it.kind == Kind.BOMB && it.seen == 1 }
-            if (fresh.isNotEmpty() && !strokeIsSafe(s, fresh, f.aspect)) abort(tracks, f.aspect, nowMs)
+            // Re-check every frame: new bombs appear, and known ones reveal their real velocity.
+            if (!strokeIsSafe(s, tracks.filter { it.kind == Kind.BOMB }, f.aspect, fromMs = nowMs)) abort(tracks, f.aspect, nowMs)
             return
         }
         val s = planner.plan(tracks, nowMs, f.aspect, masks) ?: return
@@ -55,7 +67,8 @@ class RunController(rng: Random, private val dispatch: (Stroke) -> Unit, private
     /** Replaces the gesture in flight with a 1 ms tap in the corner farthest from every bomb. */
     private fun abort(tracks: List<Track>, aspect: Float, nowMs: Long) {
         val bombs = tracks.filter { it.kind == Kind.BOMB }
-        val corners = listOf(Vec(.05f, .1f * aspect), Vec(.95f, .1f * aspect), Vec(.05f, .95f * aspect), Vec(.95f, .95f * aspect))
+        // Bottom corners only: the game's close button is at the top left.
+        val corners = listOf(Vec(.05f, .95f * aspect), Vec(.95f, .95f * aspect))
             .filter { c -> masks.none { it.contains(c) } }
         val spot = corners.maxByOrNull { c -> bombs.minOfOrNull { (it.pos - c).len() } ?: Float.MAX_VALUE } ?: return
         val tap = Stroke(nowMs + planner.latencyMs, listOf(Segment(spot, spot, spot, 1)), emptyList())
