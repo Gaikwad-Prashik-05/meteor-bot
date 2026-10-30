@@ -6,7 +6,12 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 private const val SEGMENT_LEN = 0.12f
-private const val SEGMENT_MS = 60L
+private const val SEGMENT_MS = 60L                   // average cut duration; each cut takes 40..80 ms
+private val CUT_MS = 40L..80L
+private const val WOBBLE = 0.15f                     // max sideways bend, × segment length
+private const val MISS_CHANCE = 0.08f               // per new isolated meteor, while misses are allowed
+private const val ISOLATION = 0.2f
+private const val GREY_CAP = 0.15f
 private const val SPEED = SEGMENT_LEN / SEGMENT_MS   // width units per ms, also used for connectors
 private const val ANGLE_STEP = 20.0                  // degrees
 private const val CHAIN_MAX = 3
@@ -42,17 +47,41 @@ fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> 
 }
 
 class Planner(private val rng: Random, val latencyMs: Long = 60) {
+    var reactionMs: IntRange = 80..200
+    var wobble = true
+    /** Meteors this run may let through on purpose, forced misses included. */
+    val missBudget: Int = rng.nextInt(1, 5)
+    val deliberateMisses get() = ignored.size
+
+    private val ignored = HashSet<Int>()
+    private val decided = HashSet<Int>()
+    private var missesAllowed = false
+
+    /** Call once per frame: no deliberate misses once the planet greys or the budget is spent. */
+    fun allowMisses(planetGrey: Float, missedSoFar: Int) {
+        missesAllowed = planetGrey <= GREY_CAP && ignored.size + missedSoFar < missBudget
+    }
+
+    private fun isolated(m: Track, tracks: List<Track>) =
+        tracks.none { it.id != m.id && (it.pos - m.pos).len() < ISOLATION }
 
     fun plan(tracks: List<Track>, nowMs: Long, aspect: Float, masks: List<Box>): Stroke? {
         val bombs = tracks.filter { it.kind == Kind.BOMB }
-        val candidates = tracks.filter { it.kind == Kind.METEOR && it.seen >= 2 }.sortedByDescending { it.pos.y }
-        val start = nowMs + latencyMs
+        val candidates = tracks.filter { it.kind == Kind.METEOR && it.seen >= 2 && it.id !in ignored }
+            .sortedByDescending { it.pos.y }
+        val start = nowMs + latencyMs + rng.nextInt(reactionMs.first, reactionMs.last + 1)
         for (first in candidates) {
+            // Each meteor gets one chance to become a deliberate miss, the first time it is the lead target.
+            if (decided.add(first.id) && missesAllowed && isolated(first, tracks) && rng.nextFloat() < MISS_CHANCE) {
+                ignored += first.id
+                missesAllowed = false
+                continue
+            }
             val cut = cutThrough(first, start, null, bombs, aspect, masks) ?: continue
             var stroke = Stroke(start, listOf(cut), listOf(first.id))
             for (next in candidates) {
                 if (stroke.targetIds.size >= CHAIN_MAX) break
-                if (next.id in stroke.targetIds) continue
+                if (next.id in stroke.targetIds || next.id in ignored) continue
                 stroke = extend(stroke, next, bombs, aspect, masks) ?: stroke
             }
             return stroke
@@ -80,7 +109,9 @@ class Planner(private val rng: Random, val latencyMs: Long = 60) {
      * are tried outward from perpendicular in [ANGLE_STEP] steps; the first safe one wins.
      */
     private fun cutThrough(m: Track, startMs: Long, from: Vec?, bombs: List<Track>, aspect: Float, masks: List<Box>): Segment? {
-        val p = m.at(startMs + SEGMENT_MS / 2)
+        val ms = rng.nextLong(CUT_MS.first, CUT_MS.last + 1)
+        val bend = if (wobble) (rng.nextFloat() * 2 - 1) * WOBBLE * SEGMENT_LEN else 0f
+        val p = m.at(startMs + ms / 2)
         val base = if (m.vel.len() < 1e-6f) 0.0 else atan2(m.vel.y.toDouble(), m.vel.x.toDouble()) + Math.PI / 2
         for (k in 0 until (180 / ANGLE_STEP).toInt()) {
             val off = Math.toRadians(ANGLE_STEP * ((k + 1) / 2) * if (k % 2 == 0) 1 else -1)
@@ -88,7 +119,8 @@ class Planner(private val rng: Random, val latencyMs: Long = 60) {
             // When chaining, start the cut from the end nearer the previous stroke.
             var a = p - dir; var b = p + dir
             if (from != null && (b - from).len() < (a - from).len()) { val t = a; a = b; b = t }
-            val seg = Segment(a, (a + b) * 0.5f, b, SEGMENT_MS)
+            val perp = Vec(-(b - a).y, (b - a).x) * (bend / SEGMENT_LEN)
+            val seg = Segment(a, (a + b) * 0.5f + perp, b, ms)
             if (strokeIsSafe(Stroke(startMs, listOf(seg), emptyList()), bombs, aspect, masks)) return seg
         }
         return null

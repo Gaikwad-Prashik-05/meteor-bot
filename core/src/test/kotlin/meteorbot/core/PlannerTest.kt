@@ -16,7 +16,8 @@ fun bomb(x: Float, y: Float, r: Float = 0.085f, vy: Float = 0.0005f, t: Long = 1
 class PlannerTest {
     private val aspect = 2.2f
     private val now = 1000L
-    private fun planner() = Planner(Random(1))
+    // Targeting tests: no reaction delay or wobble (HumanTest covers those).
+    private fun planner() = Planner(Random(1)).apply { reactionMs = 0..0; wobble = false }
 
     @Test fun slicesLoneMeteor() {
         val m = meteor(.5f, 1f)
