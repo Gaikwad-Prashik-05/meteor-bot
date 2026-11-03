@@ -20,6 +20,14 @@ class TrackerTest {
         assertEquals(6, t.seen)
     }
 
+    @Test fun youngTrackVelocityIgnoresJitter() {
+        // True fall 0.0009/ms with +-0.01 detection jitter: frame-to-frame speed would be off by ~70%.
+        val tr = Tracker()
+        val jitter = listOf(0f, .01f, -.01f, .01f)
+        val t = (0 until 4).map { i -> tr.update(frame(i * 33L, listOf(Vec(.5f, .3f + .0009f * 33 * i + jitter[i])))).single() }.last()
+        assertEquals(0.0009f, t.vel.y, 0.00015f)
+    }
+
     @Test fun separateKindsNeverMatch() {
         val tr = Tracker()
         tr.update(frame(0, listOf(Vec(.5f, .5f))))

@@ -2,3 +2,6 @@
 build/
 */build/
 local.properties
+
+# Run logs pulled from the phone
+logs/

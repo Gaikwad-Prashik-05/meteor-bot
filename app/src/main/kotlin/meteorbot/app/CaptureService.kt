@@ -16,9 +16,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import java.io.File
+import java.io.Writer
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlin.random.Random
 import meteorbot.core.RunController
 import meteorbot.core.rgbaToArgb
 
@@ -34,6 +35,7 @@ class CaptureService : Service() {
     @Volatile var lagMs = 0L; private set      // capture delay, before any clock fallback
     @Volatile var detectMs = 0L; private set
     private val stopping = AtomicBoolean(false)
+    private var log: Writer? = null   // capture thread only
 
     override fun onBind(intent: Intent?) = null
 
@@ -69,8 +71,17 @@ class CaptureService : Service() {
 
         val (sw, sh, dpi) = screen()
         val w = sw / 3; val h = sh / 3
-        val controller = RunController(Random.Default, { s -> Bot.swipe?.perform(s) }, ::stopRun, { Bot.swipe?.cancelAll() })
-        Bot.swipe?.buttonBox()?.let { controller.masks = listOf(it) }
+        // Run log: only positions and decisions, no pixels. adb pull /sdcard/Android/data/meteorbot.app/files/logs
+        log = getExternalFilesDir("logs")?.let { dir ->
+            dir.listFiles()?.sortedBy { it.name }?.dropLast(9)?.forEach { it.delete() }  // keep the last 10 runs
+            File(dir, "run-%tF_%<tH%<tM%<tS.txt".format(java.util.Date())).bufferedWriter().also {
+                it.write("# screen ${sw}x$sh capture ${w}x$h\n")
+            }
+        }
+        val controller = RunController({ s -> Bot.swipe?.perform(s) }, ::stopRun, { Bot.swipe?.cancelAll() }) { line ->
+            runCatching { log?.run { write(line); write("\n") } }  // a full disk must not stop the bot
+        }
+        Bot.swipe?.buttonBox()?.let { controller.masks = listOf(it); log?.write("# button $it\n") }
         Bot.controller = controller
         val pixels = IntArray(w * h)
         val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
@@ -124,6 +135,7 @@ class CaptureService : Service() {
     }
 
     private fun teardown() {
+        log?.close(); log = null
         display?.release(); display = null
         reader?.close(); reader = null
         projection?.stop(); projection = null

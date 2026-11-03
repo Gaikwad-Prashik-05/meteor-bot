@@ -4,6 +4,7 @@ private const val MATCH_RADIUS = 0.1f   // width units
 private const val FIRST_MATCH_RADIUS = 0.25f // no velocity yet: a fast meteor or a dropped frame can move this far
 private const val FIRST_MATCH_RISE = 0.03f   // ...but objects only fall, so never match far upward
 private const val DROP_AFTER_MS = 150L
+private const val BASELINE_MS = 300L   // young tracks: velocity from first sighting, much less noisy than frame-to-frame
 private const val HIT_PLANET = 0.85f    // fraction of aspect below which a vanished meteor counts as missed
 
 enum class Kind { METEOR, BOMB }
@@ -12,6 +13,7 @@ data class Track(
     val id: Int, val kind: Kind, val pos: Vec, val vel: Vec /* units per ms */,
     val radius: Float, val seen: Int, val lastSeenMs: Long,
     val bornMs: Long = lastSeenMs,  // first sighting
+    val firstPos: Vec = pos,
 ) {
     fun at(tMs: Long): Vec = pos + vel * (tMs - lastSeenMs).toFloat()
 }
@@ -39,7 +41,9 @@ class Tracker {
                 used += b; unmatched -= t
                 val dt = (f.timeMs - t.lastSeenMs).coerceAtLeast(1).toFloat()
                 val inst = (blobs[b].pos - t.pos) * (1f / dt)
-                val vel = if (t.seen == 1) inst else inst * 0.6f + t.vel * 0.4f
+                val age = f.timeMs - t.bornMs
+                val vel = if (age <= BASELINE_MS) (blobs[b].pos - t.firstPos) * (1f / age.coerceAtLeast(1))
+                else inst * 0.6f + t.vel * 0.4f
                 next += t.copy(pos = blobs[b].pos, vel = vel, radius = blobs[b].radius, seen = t.seen + 1, lastSeenMs = f.timeMs)
             }
             for (b in blobs.indices) if (b !in used) {

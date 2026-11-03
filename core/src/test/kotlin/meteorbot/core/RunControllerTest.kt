@@ -1,6 +1,5 @@
 package meteorbot.core
 
-import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,7 +8,7 @@ class RunControllerTest {
     private val strokes = ArrayList<Stroke>()
     private var stops = 0
     private var cancels = 0
-    private val rc = RunController(Random(1), { strokes += it }, { stops++ }, { cancels++ })
+    private val rc = RunController({ strokes += it }, { stops++ }, { cancels++ })
 
     private fun feed(file: String, t: Long, now: Long = t) {
         val (px, w, h) = Fixtures.load(file)
@@ -28,8 +27,9 @@ class RunControllerTest {
     @Test fun dispatchesOnGameFixture() {
         feed("game6.png", 0)
         feed("game6.png", 33)
+        feed("game6.png", 66)
         assertEquals(1, strokes.size)
-        assertTrue(rc.strokeBusyUntilMs > 33)
+        assertTrue(rc.strokeBusyUntilMs > 66)
     }
 
     @Test fun nonGameAfterGameStops() {
@@ -47,6 +47,7 @@ class RunControllerTest {
     }
 
     @Test fun newBombAborts() {
+        rc.onDetected(game(-33, listOf(Vec(.5f, .96f))), -33)
         rc.onDetected(game(0, listOf(Vec(.5f, 1f))), 0)
         rc.onDetected(game(33, listOf(Vec(.5f, 1.04f))), 33)
         val first = strokes.single()
@@ -67,6 +68,7 @@ class RunControllerTest {
     }
 
     @Test fun leavingGameCancelsPendingSwipesAtOnce() {
+        rc.onDetected(game(-33, listOf(Vec(.5f, .96f))), -33)
         rc.onDetected(game(0, listOf(Vec(.5f, 1f))), 0)
         rc.onDetected(game(33, listOf(Vec(.5f, 1.04f))), 33)
         assertEquals(1, strokes.size)
@@ -80,6 +82,7 @@ class RunControllerTest {
 
     @Test fun inFlightRecheckedWithKnownBombVelocity() {
         // A known bomb whose measured velocity carries it onto the planned cut aborts the stroke.
+        rc.onDetected(game(-33, listOf(Vec(.5f, .96f))), -33)
         rc.onDetected(game(0, listOf(Vec(.5f, 1f))), 0)
         rc.onDetected(game(33, listOf(Vec(.5f, 1.04f))), 33)
         val cut = strokes.single().segments[0]

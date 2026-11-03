@@ -9,15 +9,14 @@ import org.junit.Test
 
 private var ids = 1
 fun meteor(x: Float, y: Float, vy: Float = 0.0013f, vx: Float = 0f, t: Long = 1000) =
-    Track(ids++, Kind.METEOR, Vec(x, y), Vec(vx, vy), 0.04f, 3, t)
+    Track(ids++, Kind.METEOR, Vec(x, y), Vec(vx, vy), 0.04f, 3, t, bornMs = t - 100)
 fun bomb(x: Float, y: Float, r: Float = 0.085f, vy: Float = 0.0005f, t: Long = 1000) =
     Track(ids++, Kind.BOMB, Vec(x, y), Vec(0f, vy), r, 3, t)
 
 class PlannerTest {
     private val aspect = 2.2f
     private val now = 1000L
-    // Targeting tests: no reaction delay or wobble (HumanTest covers those).
-    private fun planner() = Planner(Random(1)).apply { reactionMs = 0..0; wobble = false }
+    private fun planner() = Planner()
 
     @Test fun slicesLoneMeteor() {
         val m = meteor(.5f, 1f)
@@ -91,18 +90,20 @@ class PlannerTest {
         assertNotNull(planner().plan(listOf(m, fresh.copy(seen = 3)), now, aspect, emptyList()))
     }
 
+    private val flat = Stroke(1060, listOf(Segment(Vec(.44f, 1f), Vec(.5f, 1f), Vec(.56f, 1f), 60)), emptyList())
+
     @Test fun lateStrokeStillClear() {
         // Safety holds even if the gesture runs up to 80 ms late: a bomb that only reaches the cut
         // after its planned time must still block it.
-        val m = meteor(.5f, 1f, vy = 0f)
-        val b = bomb(.5f, 0.55f, vy = 0.0015f)  // 0.30 clear on time, 0.18 if 80 ms late
-        assertNull(planner().plan(listOf(m, b), now, aspect, emptyList()))
+        val b = bomb(.5f, 0.6f, vy = 0.0015f)  // 0.22 clear on time, 0.10 if 80 ms late
+        assertEquals(Block.BOMB, blockReason(flat, listOf(b), aspect))
+        assertNull(blockReason(flat, listOf(b.copy(vel = Vec(0f, 0.0008f))), aspect))
     }
 
     @Test fun strokeKeepsClearOfMaskedArea() {
-        // a bomb could be hidden under the button, so cuts stay well away from it
-        val m = meteor(.5f, 1f, vy = 0f)
-        assertNull(planner().plan(listOf(m), now, aspect, listOf(Box(.62f, .9f, .7f, 1.1f))))
+        // a bomb could be hidden under the button, so cuts stay a margin away from it
+        assertEquals(Block.MASK, blockReason(flat, emptyList(), aspect, listOf(Box(.6f, .9f, .7f, 1.1f))))
+        assertNull(blockReason(flat, emptyList(), aspect, listOf(Box(.64f, .9f, .7f, 1.1f))))
     }
 
     @Test fun controlPointMustBeOnScreen() {
@@ -116,5 +117,43 @@ class PlannerTest {
         val b = bomb(.3f, 1f, vy = 0f, t = now)
         assertTrue(!strokeIsSafe(s, listOf(b), aspect))
         assertTrue(strokeIsSafe(s, listOf(b), aspect, fromMs = now + 60))
+    }
+
+    @Test fun ignoresMeteorNotInLatestFrame() {
+        // A sliced meteor lingers as a track; only meteors seen in the newest frame are targets.
+        val gone = meteor(.5f, 1f, t = 967)
+        assertNull(planner().plan(listOf(gone, bomb(.1f, 1.9f)), now, aspect, emptyList()))
+    }
+
+    @Test fun ignoresBrandNewMeteor() {
+        assertNull(planner().plan(listOf(meteor(.5f, 1f).copy(bornMs = 980)), now, aspect, emptyList()))
+    }
+
+    @Test fun bombTrailAboveCounts() {
+        // A swipe just above a bomb crosses its flame trail.
+        val b = bomb(.5f, 1.2f, vy = 0f)
+        assertEquals(Block.BOMB, blockReason(flat, listOf(b), aspect))
+    }
+
+    @Test fun fatalSwipeFromRun20261102IsBlocked() {
+        // Real numbers from logs/run-2026-11-02_170331.txt: this swipe passed just above bomb b35 and lost the run.
+        val b35 = Track(35, Kind.BOMB, Vec(.52f, .74f), Vec(0f, .0008f), .092f, 20, 761)
+        val s = Stroke(846, listOf(Segment(Vec(.60f, .66f), Vec(.54f, .65f), Vec(.48f, .64f), 60)), listOf(41))
+        assertEquals(Block.BOMB, blockReason(s, listOf(b35), aspect))
+    }
+
+    @Test fun reportsWhyNothingWasPlanned() {
+        val p = planner()
+        assertNull(p.plan(listOf(meteor(.5f, 1f), bomb(.5f, 1.03f, r = 0.03f)), now, aspect, emptyList()))
+        assertTrue(p.blocked[Block.BOMB.ordinal] > 0)
+    }
+}
+
+class TrackerSightingTest {
+    @Test fun trackerRemembersFirstSighting() {
+        val tr = Tracker()
+        val f = { t: Long, y: Float -> Frame(t, 2.2f, ScreenState.GAME, listOf(Blob(Vec(.5f, y), .04f)), emptyList(), 0f) }
+        tr.update(f(100, .5f)); tr.update(f(133, .53f))
+        assertEquals(100L, tr.update(f(166, .56f)).single().bornMs)
     }
 }

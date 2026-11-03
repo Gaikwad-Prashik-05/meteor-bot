@@ -3,24 +3,20 @@ package meteorbot.core
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.random.Random
 
 private const val SEGMENT_LEN = 0.12f
-private const val SEGMENT_MS = 60L                   // average cut duration; each cut takes 40..80 ms
-private val CUT_MS = 40L..80L
-private const val WOBBLE = 0.15f                     // max sideways bend, × segment length
-private const val MISS_CHANCE = 0.08f               // per new isolated meteor, while misses are allowed
-private const val ISOLATION = 0.2f
-private const val GREY_CAP = 0.15f
+private const val SEGMENT_MS = 60L
 private const val SPEED = SEGMENT_LEN / SEGMENT_MS   // width units per ms, also used for connectors
 private const val ANGLE_STEP = 20.0                  // degrees
 private const val CHAIN_MAX = 3
 private const val CHAIN_REACH = 0.25f
-private const val BOMB_CLEARANCE = 1.5f * 2f         // × bomb radius, i.e. 1.5 bomb diameters from its centre
+private const val BOMB_CLEARANCE = 1.5f              // × bomb radius, from its centre
 private const val SAMPLE_MS = 5L
 private const val LATE_SLACK_MS = 80L                // gestures may run this late; bombs are checked over the window
+private const val EARLY_SLACK_MS = 60L               // ...or land as soon as they are dispatched (latencyMs early)
+private const val MIN_TRACK_MS = 50L                 // a meteor must be tracked this long before its velocity is trusted
 private const val BOMB_MAX_FALL = 0.003f             // width units per ms; assumed for a bomb seen only once
-private const val MASK_MARGIN = 0.18f                // a bomb may hide under the button; keep cuts this far away
+private const val MASK_MARGIN = 0.06f                // a bomb may hide under the button; keep cuts this far away
 private const val HUD = 0.08f
 
 /** A quadratic curve from a to b with control point mid. */
@@ -35,24 +31,29 @@ data class Stroke(val startMs: Long, val segments: List<Segment>, val targetIds:
  * True when every point of the stroke from [fromMs] on keeps clear of every bomb, even if the finger
  * gets there up to [LATE_SLACK_MS] late. A bomb seen only once is assumed to be falling as fast as anything does.
  */
-fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> = emptyList(), fromMs: Long = Long.MIN_VALUE): Boolean {
+fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> = emptyList(), fromMs: Long = Long.MIN_VALUE) =
+    blockReason(s, bombs, aspect, masks, fromMs) == null
+
+/** Why a stroke is unsafe: [Block.EDGE], [Block.MASK] or [Block.BOMB]; null when it is safe. */
+fun blockReason(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> = emptyList(), fromMs: Long = Long.MIN_VALUE): Block? {
     val keepOut = masks.map { Box(it.l - MASK_MARGIN, it.t - MASK_MARGIN, it.r + MASK_MARGIN, it.b + MASK_MARGIN) }
     var t0 = s.startMs
     for (seg in s.segments) {
         // The path's control point counts toward gesture bounds, so it must be on screen too.
-        if (seg.mid.x !in 0f..1f || seg.mid.y !in 0f..aspect) return false
+        if (seg.mid.x !in 0f..1f || seg.mid.y !in 0f..aspect) return Block.EDGE
         var dt = 0L
         while (true) {
             val t = t0 + dt
             val p = seg.point(if (seg.durationMs == 0L) 1f else dt.toFloat() / seg.durationMs)
             if (t >= fromMs) {
-                if (p.x !in 0f..1f || p.y !in HUD * aspect..aspect) return false
-                if (keepOut.any { it.contains(p) }) return false
+                if (p.x !in 0f..1f || p.y !in HUD * aspect..aspect) return Block.EDGE
+                if (keepOut.any { it.contains(p) }) return Block.MASK
                 for (b in bombs) {
-                    val from = b.at(t)
+                    // The bomb's flame trail above it counts as bomb too: a swipe through it lost a run.
+                    val from = b.at(t - EARLY_SLACK_MS) - Vec(0f, b.radius)
                     val to = if (b.seen > 1) b.at(t + LATE_SLACK_MS)
-                    else from + Vec(0f, BOMB_MAX_FALL * (t + LATE_SLACK_MS - b.lastSeenMs).coerceAtLeast(0))
-                    if (distToSegment(p, from, to) <= BOMB_CLEARANCE * b.radius) return false
+                    else b.pos + Vec(0f, BOMB_MAX_FALL * (t + LATE_SLACK_MS - b.lastSeenMs).coerceAtLeast(0))
+                    if (distToSegment(p, from, to) <= BOMB_CLEARANCE * b.radius) return Block.BOMB
                 }
             }
             if (dt >= seg.durationMs) break
@@ -60,48 +61,30 @@ fun strokeIsSafe(s: Stroke, bombs: List<Track>, aspect: Float, masks: List<Box> 
         }
         t0 += seg.durationMs
     }
-    return true
+    return null
 }
 
-class Planner(private val rng: Random, val latencyMs: Long = 60) {
-    var reactionMs: IntRange = 80..200
-    var wobble = true
-    /** Meteors this run may let through on purpose, forced misses included. */
-    val missBudget: Int = rng.nextInt(1, 5)
-    val deliberateMisses get() = ignored.size
+enum class Block { EDGE, MASK, BOMB }
 
-    private val ignored = HashSet<Int>()
-    private val decided = HashSet<Int>()
-    private var missesAllowed = false
-
-    /** Call once per frame: no deliberate misses once the planet greys or the budget is spent. */
-    fun allowMisses(planetGrey: Float, missedSoFar: Int) {
-        missesAllowed = planetGrey <= GREY_CAP && ignored.size + missedSoFar < missBudget
-    }
-
-    private fun isolated(m: Track, tracks: List<Track>) =
-        tracks.none { it.id != m.id && (it.pos - m.pos).len() < ISOLATION }
+class Planner(val latencyMs: Long = 60) {
+    /** Rejected cut attempts in the last [plan] call, by reason; for the run log. */
+    val blocked = IntArray(Block.entries.size)
 
     fun plan(tracks: List<Track>, nowMs: Long, aspect: Float, masks: List<Box>): Stroke? {
+        blocked.fill(0)
         val bombs = tracks.filter { it.kind == Kind.BOMB }
-        val candidates = tracks.filter { it.kind == Kind.METEOR && it.seen >= 2 && it.id !in ignored }
-            .sortedByDescending { it.pos.y }
-        val delay = rng.nextInt(reactionMs.first, reactionMs.last + 1)
+        // Only meteors in the latest frame: a sliced one lingers as a track for a while and was being swiped twice.
+        val latest = tracks.maxOfOrNull { it.lastSeenMs } ?: return null
+        val candidates = tracks.filter {
+            it.kind == Kind.METEOR && it.seen >= 2 && it.lastSeenMs == latest && it.lastSeenMs - it.bornMs >= MIN_TRACK_MS
+        }.sortedByDescending { it.pos.y }
+        val start = nowMs + latencyMs
         for (first in candidates) {
-            // Reaction time counts from the meteor's first sighting, like a person who saw it coming,
-            // so the bot never sits idle between strokes.
-            val start = maxOf(nowMs, first.bornMs + delay) + latencyMs
-            // Each meteor gets one chance to become a deliberate miss, the first time it is the lead target.
-            if (decided.add(first.id) && missesAllowed && isolated(first, tracks) && rng.nextFloat() < MISS_CHANCE) {
-                ignored += first.id
-                missesAllowed = false
-                continue
-            }
             val cut = cutThrough(first, start, null, bombs, aspect, masks) ?: continue
             var stroke = Stroke(start, listOf(cut), listOf(first.id))
             for (next in candidates) {
                 if (stroke.targetIds.size >= CHAIN_MAX) break
-                if (next.id in stroke.targetIds || next.id in ignored) continue
+                if (next.id in stroke.targetIds) continue
                 stroke = extend(stroke, next, bombs, aspect, masks) ?: stroke
             }
             return stroke
@@ -129,8 +112,7 @@ class Planner(private val rng: Random, val latencyMs: Long = 60) {
      * are tried outward from perpendicular in [ANGLE_STEP] steps; the first safe one wins.
      */
     private fun cutThrough(m: Track, startMs: Long, from: Vec?, bombs: List<Track>, aspect: Float, masks: List<Box>): Segment? {
-        val ms = rng.nextLong(CUT_MS.first, CUT_MS.last + 1)
-        val bend = if (wobble) (rng.nextFloat() * 2 - 1) * WOBBLE * SEGMENT_LEN else 0f
+        val ms = SEGMENT_MS
         val p = m.at(startMs + ms / 2)
         val base = if (m.vel.len() < 1e-6f) 0.0 else atan2(m.vel.y.toDouble(), m.vel.x.toDouble()) + Math.PI / 2
         for (k in 0 until (180 / ANGLE_STEP).toInt()) {
@@ -139,9 +121,9 @@ class Planner(private val rng: Random, val latencyMs: Long = 60) {
             // When chaining, start the cut from the end nearer the previous stroke.
             var a = p - dir; var b = p + dir
             if (from != null && (b - from).len() < (a - from).len()) { val t = a; a = b; b = t }
-            val perp = Vec(-(b - a).y, (b - a).x) * (bend / SEGMENT_LEN)
-            val seg = Segment(a, (a + b) * 0.5f + perp, b, ms)
-            if (strokeIsSafe(Stroke(startMs, listOf(seg), emptyList()), bombs, aspect, masks)) return seg
+            val seg = Segment(a, (a + b) * 0.5f, b, ms)
+            val why = blockReason(Stroke(startMs, listOf(seg), emptyList()), bombs, aspect, masks) ?: return seg
+            blocked[why.ordinal]++
         }
         return null
     }

@@ -88,8 +88,8 @@ class SwipeService : AccessibilityService() {
         val v = stats ?: return
         if (c == null || cap == null || !cap.running) return  // keep the last run's numbers on screen
         v.visibility = View.VISIBLE
-        v.text = "fps %d lag %d det %d stale %d | sent %d ok %d x %d abort %d | grey %.2f".format(
-            (c.frames - lastFrames) * 2, cap.lagMs, cap.detectMs, c.stale, c.strokes, done, cancelled, c.aborts, c.lastGrey)
+        v.text = "fps %d lag %d det %d stale %d | sent %d ok %d x %d abort %d miss %d | grey %.2f".format(
+            (c.frames - lastFrames) * 2, cap.lagMs, cap.detectMs, c.stale, c.strokes, done, cancelled, c.aborts, c.tracker.missed, c.lastGrey)
         lastFrames = c.frames
         main.postDelayed(::showStats, 500)
     }
